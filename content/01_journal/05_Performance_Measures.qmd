@@ -1,8 +1,206 @@
 ---
-title: "Data Visualization"
-author: "Joschka Schwarz"
+title: "Performance Measures"
+author: "Sarvenaz Mostafazadeh"
 ---
 
-::: callout-note
-You can delete everything in here and start fresh.
-:::
+# Leaderboard Visualization and Tune a Model with Grid Search
+```{r, fig.width= 10, fig.height=10}
+##----.libraries----
+library(h2o)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(forcats)
+library(purrr)
+
+##----.Initialize H2O----
+
+h2o.init()
+h2o.removeAll()
+##----.Load the training, validation, and test datasets----
+train_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+valid_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+test_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+
+##----.the response and predictor variables----
+response <- "went_on_backorder"
+predictors <- setdiff(names(train_df), response)
+
+##----.AutoML----
+automl_models_h2o <- h2o.automl(
+  x = predictors,
+  y = response,
+  training_frame = train_df,
+  validation_frame = valid_df,
+  max_runtime_secs = 60
+)
+
+##----leaderboard----
+leaderboard <- automl_models_h2o@leaderboard
+print(leaderboard)
+
+##----Extract the leader model----
+leader_model <- automl_models_h2o@leader
+leader_model
+
+##----.Predict using the leader model----
+predictions <- h2o.predict(leader_model, newdata = test_df)
+predictions_tbl <- as_tibble(predictions)
+predictions_tbl
+
+##----.Set the directory path to save the leader model-----
+save_directory <- "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/leadermodel"
+
+##----.Save the leader model----
+h2o.saveModel(leader_model, path = save_directory, force = TRUE)
+
+
+##----.Visualize the leaderboard----
+plot_h2o_leaderboard <- function(h2o_leaderboard, order_by = c("auc", "logloss"),
+                                 n_max = 20, size = 4, include_lbl = TRUE) {
+  # Setup inputs
+  order_by <- tolower(order_by[[1]])
+  
+  leaderboard_tbl <- h2o_leaderboard %>%
+    as_tibble() %>%
+    select(-c(aucpr, mean_per_class_error, rmse, mse)) %>% 
+    mutate(model_type = str_extract(model_id, "[^_]+")) %>%
+    rownames_to_column(var = "rowname") %>%
+    mutate(model_id = paste0(rowname, ". ", model_id) %>% as.factor())
+  
+  # Transformation
+  if (order_by == "auc") {
+    data_transformed_tbl <- leaderboard_tbl %>%
+      slice(1:n_max) %>%
+      mutate(
+        model_id = as_factor(model_id) %>% reorder(auc),
+        model_type = as.factor(model_type)
+      ) %>%
+      pivot_longer(cols = -c(model_id, model_type, rowname), 
+                   names_to = "key", 
+                   values_to = "value", 
+                   names_transform = list(key = forcats::fct_inorder)
+      )
+  } else if (order_by == "logloss") {
+    data_transformed_tbl <- leaderboard_tbl %>%
+      slice(1:n_max) %>%
+      mutate(
+        model_id = as_factor(model_id) %>% reorder(logloss) %>% fct_rev(),
+        model_type = as.factor(model_type)
+      ) %>%
+      pivot_longer(cols = -c(model_id, model_type, rowname), 
+                   names_to = "key", 
+                   values_to = "value", 
+                   names_transform = list(key = forcats::fct_inorder)
+      )
+  } else {
+    # If nothing is supplied
+    stop(paste0("order_by = '", order_by, "' is not a permitted option."))
+  }
+  
+  # Visualization
+  g <- data_transformed_tbl %>%
+    ggplot(aes(value, model_id, color = model_type)) +
+    geom_point(size = size) +
+    facet_wrap(~ key, scales = "free_x") +
+    labs(title = "Leaderboard Metrics",
+         subtitle = paste0("Ordered by: ", toupper(order_by)),
+         y = "Model Position, Model ID", x = "")
+  
+  if (include_lbl) g <- g + geom_label(aes(label = round(value, 2), hjust = "inward"))
+  
+  return(g)
+}
+
+plot_h2o_leaderboard(automl_models_h2o@leaderboard, order_by = "auc", n_max = 15)
+
+##----.grid search----
+
+# Deeplearning algorithm
+deeplearning_grid_01 <- h2o.grid(
+  algorithm = "deeplearning",
+  grid_id = "deeplearning_grid",
+  x = predictors,
+  y = response,
+  training_frame = train_df,
+  validation_frame = valid_df,
+  nfolds = 5,
+  hyper_params = list(
+    hidden = list(c(10, 10, 10), c(50, 20, 10), c(20, 20, 20)),
+    epochs = c(10, 50, 100)
+  )
+)
+
+deeplearning_grid_01
+
+h2o.getGrid(grid_id = "deeplearning_grid", sort_by = "auc", decreasing = TRUE)
+
+deeplearning_grid_model_4 <- h2o.getModel("deeplearning_grid_model_4")
+
+deeplearning_grid_model_4 %>% h2o.auc(train = T, valid = T, xval = T)
+
+# Run it on the test data
+deeplearning_grid_model_4 %>%
+  h2o.performance(newdata = as.h2o(test_df))
+
+```
+
+# Visualize the trade of between the precision and the recall
+```{r, fig.width= 10, fig.height=10}
+##----.Assessing Performance----
+
+# Extract the model from the leaderboard
+model1 <- automl_models_h2o@leaderboard[1, "model_id"] %>%
+  h2o.getModel()
+
+model2 <- automl_models_h2o@leaderboard[5, "model_id"] %>%
+  h2o.getModel()
+
+model3 <- automl_models_h2o@leaderboard[6, "model_id"] %>%
+  h2o.getModel()
+
+path1 <- h2o.saveModel(model1, path = save_directory, force = TRUE)
+path2 <- h2o.saveModel(model2, path = save_directory, force = TRUE)
+path3 <- h2o.saveModel(model3, path = save_directory, force = TRUE)
+
+
+performance_h2o <- h2o.performance(model1, newdata = as.h2o(test_df))
+
+typeof(performance_h2o)
+performance_h2o %>% slotNames()
+performance_h2o@metrics
+
+##----.Precision vs Recall Plot----
+performance_tbl <- performance_h2o %>%
+  h2o.metric() %>%
+  as.tibble() 
+
+performance_tbl %>% 
+  glimpse()
+
+theme_new <- theme(
+  legend.position  = "bottom",
+  legend.key       = element_blank(),
+  panel.background = element_rect(fill   = "transparent"),
+  panel.border     = element_rect(color = "black", fill = NA, size = 0.5),
+  panel.grid.major = element_line(color = "grey", size = 0.333)
+) 
+
+performance_tbl %>%
+  filter(f1 == max(f1))
+
+performance_tbl %>%
+  ggplot(aes(x = threshold)) +
+  geom_line(aes(y = precision), color = "blue", size = 1) +
+  geom_line(aes(y = recall), color = "red", size = 1) +
+  
+  # Insert line where precision and recall are harmonically optimized
+  geom_vline(xintercept = h2o.find_threshold_by_max_metric(performance_h2o, "f1")) +
+  labs(title = "Precision vs Recall", y = "value") +
+  theme_new
+
+```
+
