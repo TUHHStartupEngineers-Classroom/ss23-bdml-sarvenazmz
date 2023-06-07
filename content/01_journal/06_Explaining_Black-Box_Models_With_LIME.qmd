@@ -1,0 +1,274 @@
+---
+title: "Explaining Black-Box Models With LIME"
+author: "Sarvenaz Mostafazadeh"
+---
+# Setup
+```{r, fig.width= 10, fig.height=10}
+
+##----.Libraries----
+
+library(h2o)
+library(recipes)
+library(readxl)
+library(tidyverse)
+library(tidyquant)
+library(lime)
+library(ggplot2)
+library(stringr)
+
+# 1. Setup ----
+
+##----.Load Data and Make It Readable----
+employee_attrition_tbl <- read_csv("C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/datasets-1067-1925-WA_Fn-UseC_-HR-Employee-Attrition.csv")
+definitions_raw_tbl    <- read_excel("C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/data_definitions.xlsx", sheet = 1, col_names = FALSE)
+
+process_hr_data_readable <- function(data, definitions_tbl) {
+  
+  definitions_list <- definitions_tbl %>%
+    fill(...1, .direction = "down") %>%
+    filter(!is.na(...2)) %>%
+    separate(...2, into = c("key", "value"), sep = " '", remove = TRUE) %>%
+    rename(column_name = ...1) %>%
+    mutate(key = as.numeric(key)) %>%
+    mutate(value = value %>% str_replace(pattern = "'", replacement = "")) %>%
+    split(.$column_name) %>%
+    map(~ select(., -column_name)) %>%
+    map(~ mutate(., value = as_factor(value))) 
+  
+  for (i in seq_along(definitions_list)) {
+    list_name <- names(definitions_list)[i]
+    colnames(definitions_list[[i]]) <- c(list_name, paste0(list_name, "_value"))
+  }
+  
+  data_merged_tbl <- list(HR_Data = data) %>%
+    append(definitions_list, after = 1) %>%
+    reduce(left_join) %>%
+    select(-one_of(names(definitions_list))) %>%
+    set_names(str_replace_all(names(.), pattern = "_value", 
+                              replacement = "")) %>%
+    select(sort(names(.))) %>%
+    mutate_if(is.character, as.factor) %>%
+    mutate(
+      BusinessTravel = BusinessTravel %>% fct_relevel("Non-Travel", 
+                                                      "Travel_Rarely", 
+                                                      "Travel_Frequently"),
+      MaritalStatus  = MaritalStatus %>% fct_relevel("Single", 
+                                                     "Married", 
+                                                     "Divorced")
+    )
+  
+  return(data_merged_tbl)
+  
+}
+process_hr_data_readable(employee_attrition_tbl, definitions_raw_tbl)
+
+employee_attrition_readable_tbl <- process_hr_data_readable(employee_attrition_tbl, definitions_raw_tbl)
+
+##----.Split into test and train----
+set.seed(seed = 1113)
+split_obj <- rsample::initial_split(employee_attrition_readable_tbl, prop = 0.85)
+
+##---.Assign training and test data----
+train_readable_tbl <- rsample::training(split_obj)
+test_readable_tbl  <- rsample::testing(split_obj)
+
+##----.Recipe---- 
+recipe_obj <- recipe(Attrition ~ ., data = train_readable_tbl) %>%
+  step_zv(all_predictors()) %>%
+  step_mutate_at(c("JobLevel", "StockOptionLevel"), fn = as.factor) %>% 
+  prep()
+
+train_tbl <- bake(recipe_obj, new_data = train_readable_tbl)
+test_tbl  <- bake(recipe_obj, new_data = test_readable_tbl)
+
+# 2. Models ----
+
+h2o.init()
+
+split_h2o <- h2o.splitFrame(as.h2o(train_tbl), ratios = c(0.85), seed = 1234)
+train_h2o <- split_h2o[[1]]
+valid_h2o <- split_h2o[[2]]
+test_h2o  <- as.h2o(test_tbl)
+
+##----.Set the target and predictors----
+y <- "Attrition"
+x <- setdiff(names(train_h2o), y)
+
+
+automl_models_h2o <- h2o.automl(
+  x = x,
+  y = y,
+  training_frame    = train_h2o,
+  validation_frame  = valid_h2o,
+  leaderboard_frame = test_h2o,
+  max_runtime_secs  = 30,
+  nfolds            = 5 
+)
+
+##----.leaderboard----
+leaderboard <- automl_models_h2o@leaderboard
+
+save_directory <- "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/5/leadermodel"
+
+##----.Extract the model from the leaderboard----
+automl_leader <- automl_models_h2o@leaderboard[5, "model_id"] %>%
+  h2o.getModel()
+
+```
+
+# LIME and Single Explanation
+```{r, fig.width= 10, fig.height=10}
+# 3. LIME ----
+
+##----.Making Predictions----
+
+predictions_tbl <- automl_leader %>% 
+  h2o.predict(newdata = as.h2o(test_tbl)) %>%
+  as.tibble() %>%
+  bind_cols(
+    test_tbl %>%
+      select(Attrition, EmployeeNumber)
+  )
+
+test_tbl %>%
+  slice(4)
+
+##----Single Explanation----
+
+#part1
+explainer <- train_tbl %>%
+  select(-Attrition) %>%
+  lime(
+    model           = automl_leader,
+    bin_continuous  = TRUE,
+    n_bins          = 4,
+    quantile_bins   = TRUE
+  )
+
+
+#part2
+explanation <- test_tbl %>%
+  slice(1) %>%
+  select(-Attrition) %>%
+  lime::explain(
+    
+    # Pass our explainer object
+    explainer = explainer,
+    # Because it is a binary classification model: 1
+    n_labels   = 1,
+    # number of features to be returned
+    n_features = 8,
+    # number of localized linear models
+    n_permutations = 5000,
+    # Let's start with 1
+    kernel_width   = 1
+  )
+
+
+explanation %>%
+  as.tibble()
+
+
+# Transform the explanation tibble to a data frame
+explanation_df <- as.data.frame(explanation)
+
+# Select only the columns "feature" and "feature_weight"
+plot_data <- explanation_df[, c("feature", "feature_weight")]
+
+# Order the data by feature_weight to have a sorted barplot
+plot_data <- plot_data[order(plot_data$feature_weight), ]
+
+# Add new column "Support"
+plot_data$Support <- ifelse(plot_data$feature_weight > 0, "Supports", "Contradicts")
+
+# EmployeeNumber of the case for which the explanation was created
+explained_employee <- test_tbl$EmployeeNumber[1]
+
+# Select the feature values for the explained case
+explained_case_features <- test_tbl[1, ]
+
+# Convert the data to a tibble and data frame
+explained_case_features %>%
+  as_tibble() 
+explained_case_features_df <- as.data.frame(explained_case_features)
+
+# Loop through each feature in the explanation dataframe
+for(i in 1:nrow(explanation_df)){
+  # Get the feature name
+  feature_name <- explanation_df$feature[i]
+  
+  # Find the corresponding value in `explained_case_features_df`
+  feature_value <- explained_case_features_df[[feature_name]]
+  
+  # Modify the feature name to include the value
+  explanation_df$feature[i] <- paste(feature_name, "=", feature_value)
+}
+
+##----.Create the plot----
+plot_data <- explanation_df[, c("feature", "feature_weight")]
+plot_data <- plot_data[order(plot_data$feature_weight), ]
+plot_data$Support <- ifelse(plot_data$feature_weight > 0, "Supports", "Contradicts")
+ggplot(data = plot_data, aes(x = reorder(feature, feature_weight), y = feature_weight, fill = Support)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Supports" = "grey", "Contradicts" = "blue")) +
+  labs(x = "Features", y = "Weight", title = "Feature Importance") +
+  theme_minimal()
+
+```
+
+# LIME and Multiple Explanation
+```{r, fig.width= 10, fig.height=10}
+##----.Multiple Explanations----
+
+explanation <- test_tbl %>%
+  slice(1:20) %>%
+  select(-Attrition) %>%
+  lime::explain(
+    explainer = explainer,
+    n_labels   = 1,
+    n_features = 8,
+    n_permutations = 5000,
+    kernel_width   = 0.5
+  )
+
+explanation %>%
+  as.tibble() %>%
+  print()
+
+# Extract case number from 'case' column and convert to numeric
+explanation$case <- as.numeric(str_extract(explanation$case, "\\d+"))
+
+# Create a dummy data frame with all possible combinations of cases and labels
+dummy_data <- expand.grid(case = unique(explanation$case), label = unique(explanation$label), feature = unique(explanation$feature))
+dummy_data$feature_weight <- NA
+
+# Identify columns present in 'explanation' but not in 'dummy_data'
+missing_cols <- setdiff(names(explanation), names(dummy_data))
+
+# Add these columns to 'dummy_data' with NA values
+for (col in missing_cols) {
+  dummy_data[[col]] <- NA
+}
+
+# Now bind the dataframes
+plot_data <- rbind(dummy_data, explanation)
+
+
+# Bind the dummy data with the actual data
+plot_data <- rbind(dummy_data, explanation)
+
+
+##----.Create the plot----
+ggplot(data = plot_data, aes(x = as.factor(case), y = feature, fill = feature_weight)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "white", mid = "lightblue", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Feature\nWeight", na.value = "grey") +
+  facet_wrap(~ label, scales = "free", ncol = 2) +
+  labs(x = "Cases", y = "Features", fill = "Feature Weight") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+```
