@@ -207,7 +207,57 @@ performance_tbl %>%
 # ROC Plot
 ```{r , fig.width= 10, fig.height=10}
 ##----ROC Plot----
+##----.libraries----
+library(h2o)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(forcats)
+library(purrr)
+
+##----.Initialize H2O----
+
 h2o.init()
+h2o.removeAll()
+##----.Load the training, validation, and test datasets----
+train_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+valid_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+test_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+
+##----.the response and predictor variables----
+response <- "went_on_backorder"
+predictors <- setdiff(names(train_df), response)
+
+##----.AutoML----
+automl_models_h2o <- h2o.automl(
+  x = predictors,
+  y = response,
+  training_frame = train_df,
+  validation_frame = valid_df,
+  max_runtime_secs = 60
+)
+
+##----leaderboard----
+leaderboard <- automl_models_h2o@leaderboard
+print(leaderboard)
+
+##----Extract the leader model----
+leader_model <- automl_models_h2o@leader
+leader_model
+
+##----.Predict using the leader model----
+predictions <- h2o.predict(leader_model, newdata = test_df)
+predictions_tbl <- as_tibble(predictions)
+predictions_tbl
+
+##----.Set the directory path to save the leader model-----
+save_directory <- "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/leadermodel"
+
+##----.Save the leader model----
+h2o.saveModel(leader_model, path = save_directory, force = TRUE)
 # Define a function to load a model and calculate performance metrics
 load_model_performance_metrics <- function(model_id, test_df) {
   model <- h2o.getModel(model_id)
