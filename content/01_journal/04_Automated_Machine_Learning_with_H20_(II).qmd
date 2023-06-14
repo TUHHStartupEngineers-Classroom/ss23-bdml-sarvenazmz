@@ -1,0 +1,59 @@
+---
+title: "Automated Machine Learning with H20 (II)"
+author: "Sarvenaz Mostafazadeh"
+---
+# challenge: working with a Product Backorders dataset. The goal here is to predict whether or not a product will be put on backorder status
+
+```{r}
+##----.libraries----
+library(h2o)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(forcats)
+library(purrr)
+
+##----.Initialize H2O----
+h2o.init()
+
+##----.Load the training, validation, and test datasets----
+train_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+valid_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+test_df <- h2o.importFile(path = "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/product_backorders.csv")
+
+##----.response and predictor variables----
+response <- "went_on_backorder"
+predictors <- setdiff(names(train_df), response)
+
+##----.AutoML----
+automl_models_h2o <- h2o.automl(
+  x = predictors,
+  y = response,
+  training_frame = train_df,
+  validation_frame = valid_df,
+  max_runtime_secs = 60
+)
+
+##----.leaderboard----
+leaderboard <- automl_models_h2o@leaderboard
+print(leaderboard)
+
+##----.leader model----
+leader_model <- automl_models_h2o@leader
+leader_model
+
+##----.Predict using the leader model----
+predictions <- h2o.predict(leader_model, newdata = test_df)
+predictions_tbl <- as_tibble(predictions)
+predictions_tbl
+
+##----.Set the directory path to save the leader model----
+save_directory <- "C:/Users/mosta/Desktop/Business Decisions with Machine Learning/3/leadermodel"
+
+##----.Save the leader model----
+h2o.saveModel(leader_model, path = save_directory, force = TRUE)
+
+```

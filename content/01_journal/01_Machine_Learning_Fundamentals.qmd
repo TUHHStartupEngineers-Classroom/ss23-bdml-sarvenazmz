@@ -1,0 +1,124 @@
+---
+title: "Machine Learning Fundamentals"
+author: "Sarvenaz Mostafazadeh"
+---
+
+# Challenge: Which stock prices behave similarly?
+
+```{r plot, fig.width= 10, fig.height=10}
+##----libraries----
+library(tidyverse)
+library(tidyquant)
+library(broom)
+library(umap)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+
+##----.read the data----
+sp_500_prices_tbl <- readRDS("C:/Users/mosta/Desktop/Business Decisions with Machine Learning/1/sp_500_prices_tbl.rds")
+sp_500_prices_tbl
+sp_500_index_tbl <- readRDS("C:/Users/mosta/Desktop/Business Decisions with Machine Learning/1/sp_500_index_tbl.rds")
+sp_500_index_tbl
+
+##----.Step1 (Convert stock prices to a standardized format (daily returns)----
+sp_500_daily_returns_tbl <- sp_500_prices_tbl %>%
+  filter(date >= as.Date("2018-01-01")) %>%
+  select(symbol, date, adjusted) %>%
+  group_by(symbol) %>%
+  mutate(lag_adjusted = lag(adjusted),
+         pct_return = (adjusted - lag_adjusted) / lag_adjusted) %>%
+  filter(!is.na(pct_return)) %>%
+  select(symbol, date, pct_return) 
+  sp_500_daily_returns_tbl
+
+##----.Step2 (Convert to User-Item Format)----
+stock_date_matrix_tbl <- sp_500_daily_returns_tbl %>%
+  select(symbol, date, pct_return) %>%
+  pivot_wider(names_from = date, values_from = pct_return, values_fill = 0) %>%
+  ungroup()
+stock_date_matrix_tbl
+
+##----.step3 (Perform K-Means Clustering)----
+?kmeans
+kmeans_obj <- stock_date_matrix_tbl %>%
+  select(-symbol) %>%
+  kmeans(centers = 4, nstart = 20)
+#Get the tot.withinss using glance()
+glance(kmeans_obj)
+
+##----.step4 (Find the optimal value of K)----
+kmeans_mapper <- function(center = 4) {
+  stock_date_matrix_tbl %>%
+    select(-symbol) %>%
+    kmeans(centers = center, nstart = 20)
+}
+
+4 %>% kmeans_mapper() %>% glance()
+
+kmeans_mapped_tbl <- tibble(centers = 1:30) %>%
+  mutate(k_means = centers %>% map(kmeans_mapper)) %>%
+  mutate(glance  = k_means %>% map(glance))
+
+kmeans_mapped_tbl %>%
+  unnest(glance) %>%
+  select(centers, tot.withinss)
+
+#Scree Plot
+kmeans_mapped_tbl %>%
+  unnest(glance) %>%
+  select(centers, tot.withinss) %>%
+  ggplot(aes(centers, tot.withinss)) +
+  geom_point(color = "#2DC6D6", size = 4) +
+  geom_line(color = "#2DC6D6", size = 1) +
+  ggrepel::geom_label_repel(aes(label = centers), color = "#2DC6D6",max.overlaps = 20) + 
+  labs(title = "Scree Plot",
+       subtitle = "Measures the distance each of the symbols are from the closes K-Means center",
+       caption = "Conclusion: Based on the Scree Plot, We can see that the Scree Plot becomes linear (constant rate of change) between 5 and 10 centers for K.")
+
+##----.step5 (Apply UMAP)----
+?umap
+umap_results <- stock_date_matrix_tbl %>%
+  select(-symbol) %>%
+  umap()
+
+umap_results_tbl <- umap_results$layout %>%
+  as_tibble(.name_repair = "unique") %>% 
+  set_names(c("x", "y")) %>%
+  bind_cols(
+    stock_date_matrix_tbl %>% select(symbol)
+  )
+
+umap_results_tbl %>%
+  ggplot(aes(x, y)) +
+  geom_point(size=0.5) + 
+  geom_label_repel(aes(label = "UMAP Projection"), size = 3)
+
+#----.step6 (Combine K-Means and UMAP)----
+kmeans_obj <- kmeans_mapped_tbl %>%
+  pull(k_means) %>%
+  pluck(10)
+
+kmeans_clusters_tbl <- kmeans_obj %>% 
+  augment(stock_date_matrix_tbl) %>%
+  select(symbol, .cluster)
+umap_kmeans_results_tbl <- umap_results_tbl %>%
+  left_join(kmeans_clusters_tbl, by = "symbol") %>%
+  left_join(sp_500_index_tbl %>% select(symbol, company, sector), by = "symbol")
+
+umap_kmeans_results_tbl %>%
+  mutate(label_text = str_glue("Customer: {symbol}
+                               Cluster: {.cluster}")) %>%
+  
+  ggplot(aes(x, y, color = .cluster)) +
+  geom_point(size=0.5) +
+  geom_label_repel(aes(label = label_text), size = 2, fill = "blue", color = "white", max.overlaps = 20) +
+  scale_color_manual(values = palette_light() %>% rep(3)) +
+  labs(title = "2D Projection",
+       subtitle = "UMAP 2D Projection with K-Means Cluster Assignment") +
+  theme(legend.position = "none")
+
+
+```
